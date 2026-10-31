@@ -1,12 +1,13 @@
 --[[ ══════════════════════════════════════════════════════════════
-     VBL HITBOX HUB  ·  Volleyball Legends
+     VBL HUB  ·  Volleyball Legends
      Place ID: 73956553001240
      Tipo: hub cliente para ejecutor (Delta / Wave / Xeno / Solara / AWP)
 
-     Estructura pensada para que la publiques tú:
-       · loader  -> loadstring(game:HttpGet("TU_RAW_URL"))()
-       · config  -> archivo JSON persistente
-       · módulos -> tabs aislados, cada uno con su propio restore
+     Módulos:
+       · Hitbox   -> cubos de golpeo por acción
+       · Balón    -> escalado del balón
+       · Extras   -> multiplicadores y saque perfecto
+       · Gacha    -> auto giro de estilos y habilidades
      ══════════════════════════════════════════════════════════════ ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -15,7 +16,6 @@ local cloneref = cloneref or function(o) return o end
 local Players            = cloneref(game:GetService("Players"))
 local RunService         = cloneref(game:GetService("RunService"))
 local ReplicatedStorage  = cloneref(game:GetService("ReplicatedStorage"))
-local UserInputService   = cloneref(game:GetService("UserInputService"))
 
 local LOCAL_PLAYER = Players.LocalPlayer
 local PLACE_ID     = 73956553001240
@@ -35,8 +35,8 @@ _G.VBL_HUB_LOADED = true
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 
 local Window = Rayfield:CreateWindow({
-    Name = "VBL Hitbox Hub",
-    LoadingTitle = "VBL Hitbox Hub",
+    Name = "VBL Hub",
+    LoadingTitle = "VBL Hub",
     LoadingSubtitle = "cargando módulos...",
     ConfigurationSaving = { Enabled = false },
     KeySystem = false,
@@ -55,6 +55,12 @@ local State = {
     HitboxSize    = {},   -- [acción] = número
     BallScale     = 2,
     OnlyMine      = true, -- no tocar hitboxes de otros jugadores
+
+    RollInterval  = 0.15,
+    FreeArg       = true,
+    TargetName    = "",
+    RollCount     = 0,
+    AutoRoll      = { style = false, ability = false },
 }
 
 for _, action in ipairs(HITBOX_ACTIONS) do
@@ -77,10 +83,13 @@ local function saveConfig()
             makefolder(CONFIG_DIR)
         end
         writefile(CONFIG_FILE, game:GetService("HttpService"):JSONEncode({
-            HitboxSize = State.HitboxSize,
-            BallScale  = State.BallScale,
+            HitboxSize    = State.HitboxSize,
+            BallScale     = State.BallScale,
             HitboxEnabled = State.HitboxEnabled,
             BallEnabled   = State.BallEnabled,
+            RollInterval  = State.RollInterval,
+            FreeArg       = State.FreeArg,
+            TargetName    = State.TargetName,
         }))
     end)
 end
@@ -101,6 +110,9 @@ local function loadConfig()
     if type(data.BallScale) == "number" then State.BallScale = data.BallScale end
     if type(data.HitboxEnabled) == "boolean" then State.HitboxEnabled = data.HitboxEnabled end
     if type(data.BallEnabled) == "boolean" then State.BallEnabled = data.BallEnabled end
+    if type(data.RollInterval) == "number" then State.RollInterval = data.RollInterval end
+    if type(data.FreeArg) == "boolean" then State.FreeArg = data.FreeArg end
+    if type(data.TargetName) == "string" then State.TargetName = data.TargetName end
 end
 
 loadConfig()
@@ -215,6 +227,101 @@ if serveRF and typeof(hookmetamethod) == "function" and typeof(getnamecallmethod
     end)
 end
 
+-- ── módulo: gacha ──────────────────────────────────────────────
+local KNIT = {"Packages", "_Index", "sleitnick_knit@1.7.0", "knit", "Services"}
+
+local function knitServices()
+    local node = ReplicatedStorage
+    for _, k in ipairs(KNIT) do
+        if not node then return nil end
+        node = node:FindFirstChild(k)
+    end
+    return node
+end
+
+local RollRF = {}
+local Rolling = { style = false, ability = false }
+
+local function resolveRF(kind)
+    local cached = RollRF[kind]
+    if cached and cached.Parent then return cached end
+
+    local services = knitServices()
+    if not services then return nil end
+
+    local pattern = (kind == "style") and "style" or "abilit"
+    for _, svc in ipairs(services:GetChildren()) do
+        if svc.Name:lower():find(pattern) then
+            local rf = svc:FindFirstChild("RF")
+            local roll = rf and rf:FindFirstChild("Roll")
+            if roll and roll:IsA("RemoteFunction") then
+                RollRF[kind] = roll
+                return roll
+            end
+        end
+    end
+    return nil
+end
+
+local function currentName(kind)
+    local gui = LOCAL_PLAYER:FindFirstChild("PlayerGui")
+    local iface = gui and gui:FindFirstChild("Interface")
+    local lobby = iface and iface:FindFirstChild("Lobby")
+    if not lobby then return nil end
+    local panel = lobby:FindFirstChild((kind == "style") and "Styles" or "Abilities")
+    local top = panel and panel:FindFirstChild("TopPanel")
+    local lbl = top and top:FindFirstChild("DisplayName")
+    return lbl and lbl.Text or nil
+end
+
+local function fire(kind)
+    local rf = resolveRF(kind)
+    if not rf then return false end
+    pcall(function() rf:InvokeServer(State.FreeArg) end)
+    State.RollCount += 1
+    return true
+end
+
+local function rollLoop(kind)
+    if Rolling[kind] then return end
+    Rolling[kind] = true
+
+    task.spawn(function()
+        while Rolling[kind] and loaded do
+            if fire(kind) then
+                local target = State.TargetName:lower()
+                if target ~= "" then
+                    task.wait(0.5)
+                    local name = currentName(kind)
+                    if name and name:lower():find(target, 1, true) then
+                        Rolling[kind] = false
+                        State.AutoRoll[kind] = false
+                        Rayfield:Notify({
+                            Title = "Objetivo obtenido",
+                            Content = name,
+                            Duration = 8,
+                        })
+                        break
+                    end
+                end
+            end
+            task.wait(State.RollInterval)
+        end
+        Rolling[kind] = false
+    end)
+end
+
+local function burst(kind, count)
+    task.spawn(function()
+        for _ = 1, count do
+            if not loaded then break end
+            fire(kind)
+            task.wait(0.05)
+        end
+        Rayfield:Notify({ Title = "Ráfaga terminada", Content = count .. " giros", Duration = 4 })
+    end)
+end
+
 -- ── pestañas ───────────────────────────────────────────────────
 local TabMain = Window:CreateTab("Hitbox", 4483362458)
 TabMain:CreateSection("Cubo de golpeo")
@@ -280,6 +387,90 @@ TabBall:CreateSlider({
     end,
 })
 
+local TabGacha = Window:CreateTab("Gacha", 4483362458)
+TabGacha:CreateSection("Giros automáticos")
+
+TabGacha:CreateToggle({
+    Name = "Auto giro de estilo",
+    CurrentValue = false,
+    Callback = function(v)
+        State.AutoRoll.style = v
+        if v then rollLoop("style") else Rolling.style = false end
+    end,
+})
+
+TabGacha:CreateToggle({
+    Name = "Auto giro de habilidad",
+    CurrentValue = false,
+    Callback = function(v)
+        State.AutoRoll.ability = v
+        if v then rollLoop("ability") else Rolling.ability = false end
+    end,
+})
+
+TabGacha:CreateSlider({
+    Name = "Intervalo entre giros",
+    Range = {0, 0.6},
+    Increment = 0.05,
+    Suffix = "s",
+    CurrentValue = State.RollInterval,
+    Callback = function(v)
+        State.RollInterval = v
+        saveConfig()
+    end,
+})
+
+TabGacha:CreateButton({
+    Name = "Ráfaga x50 estilos",
+    Callback = function() burst("style", 50) end,
+})
+
+TabGacha:CreateButton({
+    Name = "Ráfaga x50 habilidades",
+    Callback = function() burst("ability", 50) end,
+})
+
+pcall(function()
+    TabGacha:CreateInput({
+        Name = "Parar al obtener",
+        PlaceholderText = "ej: Oikawa",
+        CurrentValue = State.TargetName,
+        RemoveTextAfterFocusLost = false,
+        Callback = function(v)
+            State.TargetName = v
+            saveConfig()
+        end,
+    })
+end)
+
+TabGacha:CreateSection("Avanzado")
+
+TabGacha:CreateToggle({
+    Name = "Enviar flag de giro gratis",
+    Description = "El remoto recibe 'true'. Si no giran, desactívalo",
+    CurrentValue = State.FreeArg,
+    Callback = function(v)
+        State.FreeArg = v
+        saveConfig()
+    end,
+})
+
+TabGacha:CreateButton({
+    Name = "Listar remotos de roll detectados",
+    Callback = function()
+        print("[VBL] stylesRF:", resolveRF("style"))
+        print("[VBL] abilityRF:", resolveRF("ability"))
+        local services = knitServices()
+        if services then
+            for _, svc in ipairs(services:GetChildren()) do
+                if svc:FindFirstChild("RF") then
+                    print("[VBL] servicio:", svc.Name, "->", svc.RF:GetChildren())
+                end
+            end
+        end
+    end,
+})
+
 local TabMisc = Window:CreateTab("Extras", 4483362458)
 TabMisc:CreateSection("Atributos locales")
 
@@ -326,6 +517,7 @@ TabMisc:CreateButton({
 -- ── unload ─────────────────────────────────────────────────────
 _G.VBL_HUB_UNLOAD = function()
     loaded = false
+    Rolling.style, Rolling.ability = false, false
     loopConn:Disconnect()
     restoreHitboxes()
     restoreBalls()
@@ -342,7 +534,7 @@ _G.VBL_HUB_UNLOAD = function()
 end
 
 Rayfield:Notify({
-    Title = "VBL Hitbox Hub",
-    Content = "Cargado. Cambia de pestaña para configurar.",
+    Title = "VBL Hub",
+    Content = "Cargado. Pestañas: Hitbox, Balón, Gacha, Extras.",
     Duration = 5,
 })
